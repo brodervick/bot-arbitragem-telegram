@@ -1,1 +1,1 @@
-worker: python bot_signals.py
+worker: python bot_watch_signals.py
