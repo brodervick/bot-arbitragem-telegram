@@ -1,16 +1,23 @@
-# bot_signals.py
-# Bot de sinais para 20 pares da Gate.io (timeframe 15m)
-# Regras: SMA20 + ATR14; LONG se desvio <= -thr; SHORT se desvio >= +thr
+# bot_watch_signals.py
+# Bot de sinais estilo "startsignals" para Gate.io (15m)
+# - /startsignals: liga o monitoramento periódico e mostra a watchlist
+# - /stopsignals: desliga o monitoramento
+# - /add <PAR>  /remove <PAR>  /watchlist
+# Estratégia didática: SMA20 + ATR14; desvio vs média define LONG/SHORT.
 
-import os, math, requests, pandas as pd
+import os, math, requests, pandas as pd, asyncio, time
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ===================== CONFIG =====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+INTERVAL = os.getenv("INTERVAL", "15m")          # timeframe Gate.io
+DEV = float(os.getenv("DEV", "0.004"))           # limiar 0.4% (0.004) p/ gerar sinal
+POLLING_SECONDS = int(os.getenv("POLLING", "60"))# frequência do monitor (segundos)
 
-# ---------- Configurações ----------
-INTERVAL = os.getenv("INTERVAL", "15m")     # Gate.io aceita '15m' (não '900')
-DEFAULT_DEV = float(os.getenv("DEV", "0.005"))  # 0.5% por padrão
 DEFAULT_PAIRS = [p.strip() for p in os.getenv(
     "PAIRS",
     "BTC_USDT,ETH_USDT,SOL_USDT,BNB_USDT,XRP_USDT,ADA_USDT,DOGE_USDT,TRX_USDT,AVAX_USDT,"
@@ -18,10 +25,18 @@ DEFAULT_PAIRS = [p.strip() for p in os.getenv(
 ).split(",") if p.strip()]
 
 CANDLE_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
+# ==================================================
 
-# ---------- Utilidades ----------
-def fetch_klines(pair: str, interval: str = INTERVAL, limit: int = 200):
-    """Candle Gate.io -> DataFrame crescente"""
+@dataclass
+class Position:
+    direction: str          # LONG/SHORT
+    price: float
+    stop: float
+    tp1: float
+    tp2: float
+    opened_ts: float        # epoch quando sinal foi enviado
+
+def fetch_klines(pair: str, interval: str = INTERVAL, limit: int = 120) -> Optional[pd.DataFrame]:
     try:
         r = requests.get(CANDLE_URL, params={
             "currency_pair": pair, "interval": interval, "limit": str(limit)
@@ -44,7 +59,8 @@ def simple_atr(df: pd.DataFrame, n: int = 14) -> float:
     trs=[]
     for i in range(1,len(df)):
         trs.append(max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])))
-    if not trs: return float("nan")
+    if not trs:
+        return float("nan")
     return float(pd.Series(trs).rolling(n).mean().iloc[-1])
 
 def format_signal(direction: str, pair: str, last: float, stop: float, tp1: float, tp2: float) -> str:
@@ -57,90 +73,130 @@ def format_signal(direction: str, pair: str, last: float, stop: float, tp1: floa
         f"TP1:  {tp1:.6f} | TP2: {tp2:.6f}"
     )
 
-def build_signal_for_pair(pair: str, deviation_thr: float):
-    df = fetch_klines(pair, interval=INTERVAL, limit=120)
+def try_build_signal(pair: str, deviation_thr: float = DEV) -> Optional[Position]:
+    df = fetch_klines(pair, limit=120)
     if df is None or len(df) < 30:
         return None
-
     last = float(df["close"].iloc[-1])
     ma20 = float(sma(df["close"], 20).iloc[-1])
     atr14 = simple_atr(df, 14)
     if math.isnan(atr14) or atr14 <= 0 or math.isnan(ma20):
         return None
-
     dev = (last - ma20) / ma20
-    if dev >= deviation_thr:      # SHORT
-        return format_signal("SHORT", pair, last, last + 0.5*atr14, last - 0.5*atr14, last - 1.0*atr14)
-    elif dev <= -deviation_thr:   # LONG
-        return format_signal("LONG",  pair, last, last - 0.5*atr14, last + 0.5*atr14, last + 1.0*atr14)
+    if dev >= deviation_thr:   # SHORT
+        return Position("SHORT", last, last + 0.5*atr14, last - 0.5*atr14, last - 1.0*atr14, time.time())
+    if dev <= -deviation_thr:  # LONG
+        return Position("LONG",  last, last - 0.5*atr14, last + 0.5*atr14, last + 1.0*atr14, time.time())
     return None
 
-def build_signals_text(pairs, thr):
-    blocks=[]
-    for p in pairs:
-        try:
-            sig = build_signal_for_pair(p, thr)
-        except Exception:
-            sig = None
-        if sig: blocks.append(sig)
-    if not blocks:
-        return f"⏳ Sem sinais agora.\nLimiar usado: {thr*100:.2f}% • Pares: {len(pairs)}\nTente novamente em alguns minutos."
-    return "\n\n".join(blocks)
+# ------------- STORAGE POR CHAT -------------
+# chat_data["watchlist"] -> set de pares
+# chat_data["active"]    -> bool ligado/desligado
+# chat_data["positions"] -> dict pair -> Position
+# -------------------------------------------
 
-def parse_threshold_and_pairs(args):
-    """/sinais [threshold] [pairs…]. Ex: /sinais 0.004 BTC_USDT ETH_USDT"""
-    thr = DEFAULT_DEV
-    pairs = DEFAULT_PAIRS
-    if args:
-        # se o primeiro argumento for numérico, trata como threshold
-        try:
-            cand = float(str(args[0]).replace("%",""))
-            thr = cand if cand < 1 else cand/100.0  # aceita 0.5 ou 0.005 ou 0.5%
-            args = args[1:]
-        except Exception:
-            pass
-        if args:
-            pairs = [a.upper() for a in args]
-    return thr, pairs
+async def startsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cd = context.chat_data
+    if "watchlist" not in cd:
+        cd["watchlist"] = set(DEFAULT_PAIRS[:10])  # começa com 10 do print
+    cd["active"] = True
+    if "positions" not in cd:
+        cd["positions"] = {}
 
-# ---------- Telegram ----------
+    wl = ", ".join([p.replace("_", "/") + " 15m" for p in sorted(cd["watchlist"])])
+    await update.message.reply_text("🟢 Sinais iniciados.\nWatchlist carregada: " + wl)
+
+async def stopsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cd = context.chat_data
+    cd["active"] = False
+    await update.message.reply_text("🔴 Sinais parados. Use /startsignals para ligar novamente.")
+
+async def add_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Use: /add BTC_USDT")
+        return
+    pair = context.args[0].upper()
+    cd = context.chat_data
+    cd.setdefault("watchlist", set(DEFAULT_PAIRS[:10]))
+    cd["watchlist"].add(pair)
+    await update.message.reply_text(f"✅ Adicionado: {pair.replace('_','/')} 15m")
+
+async def remove_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Use: /remove BTC_USDT")
+        return
+    pair = context.args[0].upper()
+    cd = context.chat_data
+    if "watchlist" in cd and pair in cd["watchlist"]:
+        cd["watchlist"].remove(pair)
+        await update.message.reply_text(f"🗑️ Removido: {pair.replace('_','/')} 15m")
+    else:
+        await update.message.reply_text("Par não está na watchlist.")
+
+async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wl = context.chat_data.get("watchlist", set(DEFAULT_PAIRS[:10]))
+    if not wl:
+        await update.message.reply_text("Watchlist vazia. Use /add PAR.")
+        return
+    await update.message.reply_text("👀 Watchlist: " + ", ".join(sorted(wl)))
+
+async def check_loop(context: ContextTypes.DEFAULT_TYPE):
+    """Job que verifica sinais e STOPs para cada chat ativo."""
+    for chat_id, cd in list(context.application.chat_data.items()):
+        if not cd.get("active"):
+            continue
+        wl: set = cd.get("watchlist", set(DEFAULT_PAIRS[:10]))
+        positions: Dict[str, Position] = cd.setdefault("positions", {})
+
+        # 1) tentar gerar novos sinais
+        for pair in list(wl):
+            if pair not in positions:  # só sinal novo se não tem posição aberta
+                pos = try_build_signal(pair, DEV)
+                if pos:
+                    positions[pair] = pos
+                    await context.bot.send_message(
+                        chat_id,
+                        text=format_signal(pos.direction, pair.replace("_","/"), pos.price, pos.stop, pos.tp1, pos.tp2)
+                    )
+
+        # 2) checar STOP nos sinais ativos
+        for pair, pos in list(positions.items()):
+            df = fetch_klines(pair, limit=5)
+            if df is None or df.empty:
+                continue
+            last = float(df["close"].iloc[-1])
+
+            stopped = (last <= pos.stop) if pos.direction == "LONG" else (last >= pos.stop)
+            if stopped:
+                await context.bot.send_message(
+                    chat_id,
+                    text=f"🛑 STOP — {pair.replace('_','/')} 15m @ {pos.stop:.6f}"
+                )
+                positions.pop(pair, None)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Bot de SINAIS Gate.io (15m)\n"
-        "Comando: /sinais [limiar] [pares...]\n"
-        "Ex.: /sinais 0.004 BTC_USDT ETH_USDT  (limiar 0.4%)\n"
-        "Sem parâmetros: usa 0.5% e 20 pares padrão."
-    )
-
-async def sinais(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    thr, pairs = parse_threshold_and_pairs(context.args)
-    text = build_signals_text(pairs, thr)
-    await update.message.reply_text(text)
-
-async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra valores de diagnóstico do primeiro par informado."""
-    pair = (context.args[0].upper() if context.args else DEFAULT_PAIRS[0])
-    df = fetch_klines(pair, interval=INTERVAL, limit=120)
-    if df is None or len(df) < 30:
-        await update.message.reply_text(f"Sem dados para {pair}.")
-        return
-    last = float(df['close'].iloc[-1])
-    ma20 = float(sma(df['close'], 20).iloc[-1])
-    atr14 = simple_atr(df, 14)
-    dev = (last-ma20)/ma20 if ma20 else float('nan')
-    await update.message.reply_text(
-        f"🔧 DEBUG {pair} 15m\n"
-        f"Preço: {last:.6f}\nSMA20: {ma20:.6f}\nATR14: {atr14:.6f}\nDesvio: {dev*100:.3f}%"
+        "🤖 Bot de sinais Gate.io (15m)\n"
+        "/startsignals — iniciar\n/stopsignals — parar\n"
+        "/add PAR (ex: /add ETH_USDT)\n/remove PAR\n/watchlist"
     )
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise SystemExit("❌ Defina TELEGRAM_TOKEN no ambiente")
+        raise SystemExit("Defina TELEGRAM_TOKEN no ambiente.")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("sinais", sinais))
-    app.add_handler(CommandHandler("debug", debug))
-    print("✅ Bot de sinais iniciado. Use /start e /sinais no Telegram.")
+    app.add_handler(CommandHandler("startsignals", startsignals))
+    app.add_handler(CommandHandler("stopsignals", stopsignals))
+    app.add_handler(CommandHandler("add", add_pair))
+    app.add_handler(CommandHandler("remove", remove_pair))
+    app.add_handler(CommandHandler("watchlist", watchlist_cmd))
+
+    # job periódico
+    app.job_queue.run_repeating(check_loop, interval=POLLING_SECONDS, first=2)
+
+    print("✅ Bot watch-signals iniciado. Envie /startsignals no Telegram.")
     app.run_polling()
 
 if __name__ == "__main__":
