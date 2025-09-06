@@ -424,10 +424,13 @@ async def signal_loop(app, chat_id: int):
                                f" • TP2 ~ {est['tp2']:.2f} USDT")
                         msgs.append("📈 *Entrada encontrada*\n" + "\n".join([header, sizing, pnl]))
                         # registra posição ativa para acompanhar
-                        cfg["active"][key] = {
-                            "side": sig["side"], "entry": sig["entry"], "stop": sig["stop"],
-                            "tp1": sig["tp1"], "tp2": sig["tp2"], "futures": sig["futures"],
+                        STATE["active"][key] = {
+                            "side": sig["side"],
+                            "entry": sig["entry"],
+                            "tp1": sig["tp1"],
+                            "tp2": sig["tp2"],
                             "qty": qty,
+}
                         ]
             except Exception as e:
                 msgs.append(f"⚠️ {sym} {tf}: {e}")
