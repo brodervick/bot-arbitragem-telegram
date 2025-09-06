@@ -4,18 +4,15 @@ import asyncio
 import logging
 import requests
 from typing import Dict, List, Tuple
-from datetime import datetime
 
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ───────────────────────────── Configuração ─────────────────────────────
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-NETWORK = os.getenv("REDE", "ethereum")                 # antes era NETWORK
-THRESHOLD = float(os.getenv("LIMITE", "0.10"))          # antes era THRESHOLD
-INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))    # mantido igual
+NETWORK = os.getenv("REDE", "ethereum")              # rede padrão via ENV
+THRESHOLD = float(os.getenv("LIMITE", "0.10"))       # limite em %
+INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90")) # intervalo em segundos
 
 # Lista de tokens Polygon (chain_id 137)
 DEFAULT_TOKENS = [
@@ -57,7 +54,7 @@ DEFAULT_TOKENS = [
     "0x0bA7d2e0fC1dE6fDd9C73e29eF6A4CAd69f93A1c",  # jEUR
     "0x7c9f4C87d911613Fe9ca58b579f737911AAD2D43",  # axlUSDC
     "0x2A88B032E57B48F8dF3f2B3a6109bFfd9FAdb907",  # stMATIC
-    "0x3a58dA1D0d6eD66c36190E5b44A1e6C12316C03D",  # TETU",  # TETU
+    "0x3a58dA1D0d6eD66c36190E5b44A1e6C12316C03D",  # TETU
 ]
 
 # ───────────────────────────── API GeckoTerminal ─────────────────────────────
@@ -65,7 +62,7 @@ GT_BASE = "https://api.geckoterminal.com/api/v2"
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("scanner-bot")
 
-STATE = {}
+STATE: Dict[int, dict] = {}
 
 def gt_token_top_pools(network: str, token: str, page: int = 1) -> Dict:
     url = f"{GT_BASE}/networks/{network}/tokens/{token}/pools?page={page}"
@@ -102,31 +99,15 @@ def summarize_spreads(network: str, tokens: List[str]):
     rows.sort(key=lambda r: r[3], reverse=True)
     return rows
 
-async def scanner_loop(app, chat_id: int):
-    while True:
-        cfg = STATE.get(chat_id)
-        if not cfg:
-            return
-        tokens, network, threshold = cfg["tokens"], cfg["network"], cfg["threshold"]
-        try:
-            rows = summarize_spreads(network, tokens)
-            hits = [r for r in rows if r[3] >= threshold]
-            if hits:
-                lines = [f"🔎 *Top spreads ≥ {threshold:.2f}%* — _{network}_"]
-                for addr, pmin, pmax, spread, dexes in hits[:10]:
-                    lines.append(
-                        f"`{addr}`\n"
-                        f"  • min ${pmin:.4f} | max ${pmax:.4f} | *{spread:.2f}%*\n"
-                        f"  • DEXs: {', '.join(dexes[:5])}"
-                    )
-                await app.bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
-        except Exception as e:
-            await app.bot.send_message(chat_id, f"⚠️ Erro: {e}")
-        await asyncio.sleep(INTERVAL_SEC)
-
+# ───────────────────────────── Comandos ─────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
-    STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK, "threshold": THRESHOLD, "task": None}
+    STATE[chat] = {
+        "tokens": DEFAULT_TOKENS,
+        "network": NETWORK,
+        "threshold": THRESHOLD,
+        "task": None
+    }
     await update.message.reply_text("Bot pronto! Use /startscan para iniciar.")
 
 async def cmd_startscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,7 +135,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use /start primeiro.")
         return
     await update.message.reply_text(
-        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['threshold']}%"
+    )
+
+async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Uso: /setnetwork <ethereum|polygon|arbitrum|base|...>")
@@ -164,8 +148,31 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK, "threshold": THRESHOLD, "task": None}
     STATE[chat]["network"] = net
     await update.message.reply_text(f"✅ Rede ajustada para: {net}")
-    )
 
+# ───────────────────────────── Loop do Scanner ─────────────────────────────
+async def scanner_loop(app, chat_id: int):
+    while True:
+        cfg = STATE.get(chat_id)
+        if not cfg:
+            return
+        tokens, network, threshold = cfg["tokens"], cfg["network"], cfg["threshold"]
+        try:
+            rows = summarize_spreads(network, tokens)
+            hits = [r for r in rows if r[3] >= threshold]
+            if hits:
+                lines = [f"🔎 *Top spreads ≥ {threshold:.2f}%* — _{network}_"]
+                for addr, pmin, pmax, spread, dexes in hits[:10]:
+                    lines.append(
+                        f"`{addr}`\n"
+                        f"  • min ${pmin:.4f} | max ${pmax:.4f} | *{spread:.2f}%*\n"
+                        f"  • DEXs: {', '.join(dexes[:5])}"
+                    )
+                await app.bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await app.bot.send_message(chat_id, f"⚠️ Erro: {e}")
+        await asyncio.sleep(INTERVAL_SEC)
+
+# ───────────────────────────── Main ─────────────────────────────
 def main():
     if not TOKEN:
         raise RuntimeError("Defina TELEGRAM_TOKEN no ambiente Railway!")
@@ -174,7 +181,8 @@ def main():
     app.add_handler(CommandHandler("startscan", cmd_startscan))
     app.add_handler(CommandHandler("stopscan", cmd_stopscan))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("setnetwork", cmd_setnetwork))
     app.run_polling(close_loop=False)
-
+    
 if __name__ == "__main__":
     main()
