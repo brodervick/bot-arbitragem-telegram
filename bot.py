@@ -145,7 +145,14 @@ async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     net = context.args[0].strip().lower()
     if chat not in STATE:
-        STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK, "threshold": THRESHOLD, "task": None}
+        STATE[chat] = {
+    "tokens": DEFAULT_TOKENS,
+    "network": os.getenv("REDE", "ethereum"),   # lê direto da variável
+    "threshold": THRESHOLD,
+    "task": None
+            
+} 
+THRESHOLD, "task": None}
     STATE[chat]["network"] = net
     await update.message.reply_text(f"✅ Rede ajustada para: {net}")
 
