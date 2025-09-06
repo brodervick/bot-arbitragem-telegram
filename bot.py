@@ -1,49 +1,57 @@
-# bot_signals.py
-# Bot de sinais para 20 pares da Gate.io (15m)
-# Usa SMA20 + ATR14 para gerar entradas LONG/SHORT
-
 import os
-import math
 import requests
-import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Token do Telegram (defina como variável de ambiente TELEGRAM_TOKEN no Railway)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Pegando o token do Telegram (variável de ambiente)
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Pares padrão (20 pares top da Gate.io em USDT)
-DEFAULT_PAIRS = [p.strip() for p in os.getenv(
-    "PAIRS",
-    "BTC_USDT,ETH_USDT,SOL_USDT,BNB_USDT,XRP_USDT,ADA_USDT,DOGE_USDT,TRX_USDT,AVAX_USDT,"
-    "MATIC_USDT,DOT_USDT,LTC_USDT,SHIB_USDT,UNI_USDT,LINK_USDT,XLM_USDT,ATOM_USDT,ETC_USDT,APT_USDT,NEAR_USDT"
-).split(",") if p.strip()]
+# Endpoint da Gate.io para preço atual
+GATE_IO_URL = "https://api.gateio.ws/api/v4/spot/tickers"
 
-# Gate.io API
-CANDLE_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
-
-
-def fetch_klines(pair: str, interval: str = "900", limit: int = 120):
-    """Busca candles 15m (interval=900 segundos) e retorna DataFrame"""
+# Função para consultar preço
+def get_price(symbol="BTC_USDT"):
     try:
-        r = requests.get(CANDLE_URL, params={
-            "currency_pair": pair, "interval": interval, "limit": str(limit)
-        }, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        cols = ["ts", "volume", "close", "high", "low", "open"]
-        df = pd.DataFrame(data, columns=cols)
-        for c in ["close", "high", "low", "open", "volume"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        df = df.sort_values("ts").reset_index(drop=True)
-        return df
-    except Exception:
-        return None
+        resp = requests.get(GATE_IO_URL, params={"currency_pair": symbol})
+        data = resp.json()
+        return float(data[0]["last"])
+    except Exception as e:
+        return f"Erro ao buscar preço: {e}"
 
+# /start - boas-vindas
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Bot de sinais Gate.io ativo!\nUse /sinal BTC_USDT para ver sinal.")
 
-def sma(series: pd.Series, n: int) -> pd.Series:
-    return series.rolling(n).mean()
+# /sinal - mostra sinal simples
+async def sinal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) == 0:
+        await update.message.reply_text("Digite o par, ex: /sinal BTC_USDT")
+        return
 
+    pair = context.args[0].upper()
+    price = get_price(pair)
 
-def simple_atr(df: pd.DataFrame, n: int = 14) -> float:
-    high, low, close = df["high"].values, df["low"].values,
+    if isinstance(price, str):  # erro
+        await update.message.reply_text(price)
+        return
+
+    # Estratégia simples: alerta se preço está alto ou baixo
+    mensagem = f"📊 {pair}\n💰 Preço atual: {price:.2f} USDT"
+
+    if price > 70000 and "BTC" in pair:
+        mensagem += "\n⚠️ Sinal: POSSÍVEL VENDA"
+    elif price < 60000 and "BTC" in pair:
+        mensagem += "\n⚠️ Sinal: POSSÍVEL COMPRA"
+    else:
+        mensagem += "\nℹ️ Sinal neutro"
+
+    await update.message.reply_text(mensagem)
+
+# Main
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("sinal", sinal))
+
+    print
