@@ -154,8 +154,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use /start primeiro.")
         return
     await update.message.reply_text(
-        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['threshold']}%"
-        async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Uso: /setnetwork <ethereum|polygon|arbitrum|base|...>")
