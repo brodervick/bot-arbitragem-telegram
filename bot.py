@@ -48,7 +48,7 @@ TOKENS_PADRÃO = [
     "0x0bA7d2e0fC1dE6fDd9C73e29eF6A4CAd69f93A1c",  # jEUR
     "0x7c9f4C87d911613Fe9ca58b579f737911AAD2D43",  # axlUSDC
     "0x2A88B032E57B48F8dF3f2B3a6109bFfd9FAdb907",  # stMATIC
-    "0x3a58dA1D0d6eD66c36190E5b44A1e6C12316C
+    "0x3a58dA1D0d6eD66c36190E5b44A1e6C12316C03D",  # TETU
 ]
 
 # ───────────────────────────── API GeckoTerminal ─────────────────────────────
