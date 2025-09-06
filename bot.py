@@ -249,7 +249,6 @@ def build_signal(symbol: str, tf: str, use_bias: bool = True):
         fr = funding_rate(symbol)
         if fr is not None:
             bias_txt = f" | funding {fr:.4%}"
-            # funding muito positivo → contrarian (desfavorece LONG)
             if fr > 0.01 and side == "LONG": side = None
             if fr < -0.01 and side == "SHORT": side = None
 
@@ -280,17 +279,20 @@ def build_signal(symbol: str, tf: str, use_bias: bool = True):
 
 # ============================== STATE & LOOPS ==============================
 STATE: Dict[int, dict] = {}   # por chat
-# Estrutura:
-# STATE[chat] = {
-#   "arb": {"network": str, "threshold": float, "tokens": List[str], "task": Task|None},
-#   "sig": {
-#       "watch": [(symbol, tf)],
-#       "bias": bool,
-#       "task": Task|None,
-#       "last_bar": { "SYM:TF": ts },
-#       "active": { "SYM:TF": {side, entry, stop, tp1, tp2, futures} }
-#   }
-# }
+
+# Lista inicial de 10 pares populares (Gate.io). O bot tenta spot e, se não houver, perp.
+DEFAULT_WATCH: List[Tuple[str, str]] = [
+    ("BTC/USDT", "15m"),
+    ("ETH/USDT", "15m"),
+    ("SOL/USDT", "15m"),
+    ("BNB/USDT", "15m"),
+    ("XRP/USDT", "15m"),
+    ("ADA/USDT", "15m"),
+    ("DOGE/USDT", "15m"),
+    ("LINK/USDT", "15m"),
+    ("LTC/USDT", "15m"),
+    ("AVAX/USDT", "15m"),
+]
 
 def ensure_state(chat: int):
     if chat not in STATE:
@@ -323,7 +325,7 @@ async def arb_loop(app, chat_id: int):
                 await app.bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await app.bot.send_message(chat_id, f"⚠️ Arb erro: {e}")
-        await asyncio.sleep(INTERVAL_SEC)
+        await asyncio.sleep(INTERVALO_SEC if (INTERVALO_SEC:=INTERVAL_SEC) else 90)
 
 async def signal_loop(app, chat_id: int):
     while True:
@@ -483,11 +485,19 @@ async def cmd_autosignals_rm(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cmd_startsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     ensure_state(chat)
+
+    # Carrega a lista inicial se a watchlist estiver vazia
+    if not STATE[chat]["sig"]["watch"]:
+        STATE[chat]["sig"]["watch"].extend(DEFAULT_WATCH)
+
     cfg = STATE[chat]["sig"]
     if cfg["task"] and not cfg["task"].done():
         cfg["task"].cancel()
     cfg["task"] = asyncio.create_task(signal_loop(context.application, chat))
-    await update.message.reply_text("🟢 Sinais iniciados.")
+    await update.message.reply_text(
+        "🟢 Sinais iniciados.\n"
+        "Watchlist carregada: " + ", ".join([f"{s} {t}" for s,t in STATE[chat]['sig']['watch']])
+    )
 
 async def cmd_stopsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
@@ -506,6 +516,11 @@ async def cmd_setbias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     STATE[chat]["sig"]["bias"] = (context.args[0].lower() == "on")
     await update.message.reply_text(f"✅ Bias funding: {'on' if STATE[chat]['sig']['bias'] else 'off'}")
 
+# trocar exchange on-the-fly
+import ccxt  # já importado acima, mantido aqui por clareza
+def build_exchanges_cmd(name: str):
+    return build_exchanges(name)
+
 async def cmd_setexchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global EXCHANGE_NAME, EXCHANGE, EXCHANGE_FUT
     if not context.args:
@@ -513,7 +528,7 @@ async def cmd_setexchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     name = context.args[0].lower()
     EXCHANGE_NAME = name
-    EXCHANGE, EXCHANGE_FUT = build_exchanges(name)
+    EXCHANGE, EXCHANGE_FUT = build_exchanges_cmd(name)
     await update.message.reply_text(f"✅ Exchange ajustada para: {name}")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
