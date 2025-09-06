@@ -1,3 +1,8 @@
 python-telegram-bot==20.7
 requests
 ccxt
+python-telegram-bot==21.6
+yfinance==0.2.43
+pandas==2.2.2
+pandas_ta==0.3.14b0
+APScheduler==3.10.4
