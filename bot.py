@@ -427,7 +427,7 @@ async def signal_loop(app, chat_id: int):
                         cfg["active"][key] = {
                             "side": sig["side"], "entry": sig["entry"], "stop": sig["stop"],
                             "tp1": sig["tp1"], "tp2": sig["tp2"], "futures": sig["futures"],
-                            "qty": qty
+                            "qty": qty,
                         ]
             except Exception as e:
                 msgs.append(f"⚠️ {sym} {tf}: {e}")
