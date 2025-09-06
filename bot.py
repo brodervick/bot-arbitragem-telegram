@@ -1,3 +1,10 @@
+import os
+import math
+import asyncio
+import logging
+import requests
+from typing import Dict, List, Tuple
+from datetime import datetime
 # ── Config por ENV ──
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 NETWORK = os.getenv("NETWORK", "ethereum")
