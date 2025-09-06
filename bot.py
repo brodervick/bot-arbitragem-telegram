@@ -155,6 +155,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['threshold']}%"
+        async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text("Uso: /setnetwork <ethereum|polygon|arbitrum|base|...>")
+        return
+    net = context.args[0].strip().lower()
+    if chat not in STATE:
+        STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK, "threshold": THRESHOLD, "task": None}
+    STATE[chat]["network"] = net
+    await update.message.reply_text(f"✅ Rede ajustada para: {net}")
     )
 
 def main():
