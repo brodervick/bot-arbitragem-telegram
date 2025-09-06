@@ -18,7 +18,9 @@ THRESHOLD = float(os.getenv("LIMITE", "0.10"))          # antes era THRESHOLD
 INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))    # mantido igual
 
 # Lista de tokens Polygon (chain_id 137)
-TOKENS_PADRÃO = [
+DEFAULT_TOKENS = [
+   ...
+]
     "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC.e
     "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",  # USDC (nativo)
     "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",  # DAI
