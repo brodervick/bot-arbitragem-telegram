@@ -8,11 +8,12 @@ from typing import Dict, List, Tuple
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ───────────────────────────── Configuração ─────────────────────────────
+# ───────────────────────────── Config ─────────────────────────────
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-NETWORK = os.getenv("REDE", "ethereum")              # rede padrão via ENV
-THRESHOLD = float(os.getenv("LIMITE", "0.10"))       # limite em %
-INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90")) # intervalo em segundos
+# Estes dois continuam como defaults globais (usados no /setnetwork e threshold inicial)
+NETWORK_DEFAULT = os.getenv("REDE", "ethereum")          # valor padrão vindo do Railway
+THRESHOLD = float(os.getenv("LIMITE", "0.10"))           # limite em %
+INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))     # intervalo em segundos
 
 # Lista de tokens Polygon (chain_id 137)
 DEFAULT_TOKENS = [
@@ -57,7 +58,7 @@ DEFAULT_TOKENS = [
     "0x3a58dA1D0d6eD66c36190E5b44A1e6C12316C03D",  # TETU
 ]
 
-# ───────────────────────────── API GeckoTerminal ─────────────────────────────
+# ───────────────────────────── GeckoTerminal ─────────────────────────────
 GT_BASE = "https://api.geckoterminal.com/api/v2"
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("scanner-bot")
@@ -101,10 +102,12 @@ def summarize_spreads(network: str, tokens: List[str]):
 
 # ───────────────────────────── Comandos ─────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicializa o estado do chat lendo REDE diretamente da ENV (valor atual)."""
     chat = update.effective_chat.id
+    network_env = os.getenv("REDE", "ethereum").strip().lower()
     STATE[chat] = {
         "tokens": DEFAULT_TOKENS,
-        "network": NETWORK,
+        "network": network_env,  # <- pega do Railway no momento do /start
         "threshold": THRESHOLD,
         "task": None
     }
@@ -139,20 +142,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_setnetwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permite trocar de rede via Telegram (ex.: /setnetwork polygon)."""
     chat = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Uso: /setnetwork <ethereum|polygon|arbitrum|base|...>")
         return
     net = context.args[0].strip().lower()
     if chat not in STATE:
-        STATE[chat] = {
-    "tokens": DEFAULT_TOKENS,
-    "network": os.getenv("REDE", "ethereum"),   # lê direto da variável
-    "threshold": THRESHOLD,
-    "task": None
-            
-} 
-THRESHOLD, "task": None}
+        STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK_DEFAULT, "threshold": THRESHOLD, "task": None}
     STATE[chat]["network"] = net
     await update.message.reply_text(f"✅ Rede ajustada para: {net}")
 
@@ -190,6 +187,6 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("setnetwork", cmd_setnetwork))
     app.run_polling(close_loop=False)
-    
+
 if __name__ == "__main__":
     main()
