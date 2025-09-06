@@ -1,22 +1,20 @@
 # bot_watch_signals.py
 # Bot de sinais estilo "startsignals" para Gate.io (15m)
-# - /startsignals: liga o monitoramento periódico e mostra a watchlist
-# - /stopsignals: desliga o monitoramento
+# - /startsignals liga o monitoramento periódico e mostra a watchlist
+# - /stopsignals desliga
 # - /add <PAR>  /remove <PAR>  /watchlist
 # Estratégia didática: SMA20 + ATR14; desvio vs média define LONG/SHORT.
 
-import os, math, requests, pandas as pd, asyncio, time
+import os, math, time, requests, pandas as pd
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ===================== CONFIG =====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 INTERVAL = os.getenv("INTERVAL", "15m")          # timeframe Gate.io
-DEV = float(os.getenv("DEV", "0.004"))           # limiar 0.4% (0.004) p/ gerar sinal
-POLLING_SECONDS = int(os.getenv("POLLING", "60"))# frequência do monitor (segundos)
+DEV = float(os.getenv("DEV", "0.004"))           # 0.4% (0.004) de limiar
+POLLING_SECONDS = int(os.getenv("POLLING", "60"))# frequência do monitor em s
 
 DEFAULT_PAIRS = [p.strip() for p in os.getenv(
     "PAIRS",
@@ -25,16 +23,15 @@ DEFAULT_PAIRS = [p.strip() for p in os.getenv(
 ).split(",") if p.strip()]
 
 CANDLE_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
-# ==================================================
 
 @dataclass
 class Position:
-    direction: str          # LONG/SHORT
+    direction: str
     price: float
     stop: float
     tp1: float
     tp2: float
-    opened_ts: float        # epoch quando sinal foi enviado
+    opened_ts: float
 
 def fetch_klines(pair: str, interval: str = INTERVAL, limit: int = 120) -> Optional[pd.DataFrame]:
     try:
@@ -67,7 +64,7 @@ def format_signal(direction: str, pair: str, last: float, stop: float, tp1: floa
     head = "📉 Entrada encontrada" if direction == "SHORT" else "📈 Entrada encontrada"
     return (
         f"{head}\n"
-        f"✅ {direction} {pair} 15m\n"
+        f"✅ {direction} {pair.replace('_','/')} 15m\n"
         f"Preço: {last:.6f}\n"
         f"Stop:  {stop:.6f}\n"
         f"TP1:  {tp1:.6f} | TP2: {tp2:.6f}"
@@ -80,7 +77,7 @@ def try_build_signal(pair: str, deviation_thr: float = DEV) -> Optional[Position
     last = float(df["close"].iloc[-1])
     ma20 = float(sma(df["close"], 20).iloc[-1])
     atr14 = simple_atr(df, 14)
-    if math.isnan(atr14) or atr14 <= 0 or math.isnan(ma20):
+    if any(map(math.isnan, [ma20, atr14])) or atr14 <= 0:
         return None
     dev = (last - ma20) / ma20
     if dev >= deviation_thr:   # SHORT
@@ -89,26 +86,16 @@ def try_build_signal(pair: str, deviation_thr: float = DEV) -> Optional[Position
         return Position("LONG",  last, last - 0.5*atr14, last + 0.5*atr14, last + 1.0*atr14, time.time())
     return None
 
-# ------------- STORAGE POR CHAT -------------
-# chat_data["watchlist"] -> set de pares
-# chat_data["active"]    -> bool ligado/desligado
-# chat_data["positions"] -> dict pair -> Position
-# -------------------------------------------
-
 async def startsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cd = context.chat_data
-    if "watchlist" not in cd:
-        cd["watchlist"] = set(DEFAULT_PAIRS[:10])  # começa com 10 do print
+    cd.setdefault("watchlist", set(DEFAULT_PAIRS[:10]))  # começa com 10 do print
     cd["active"] = True
-    if "positions" not in cd:
-        cd["positions"] = {}
-
-    wl = ", ".join([p.replace("_", "/") + " 15m" for p in sorted(cd["watchlist"])])
+    cd.setdefault("positions", {})
+    wl = ", ".join([p.replace("_","/") + " 15m" for p in sorted(cd["watchlist"])])
     await update.message.reply_text("🟢 Sinais iniciados.\nWatchlist carregada: " + wl)
 
 async def stopsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cd = context.chat_data
-    cd["active"] = False
+    context.chat_data["active"] = False
     await update.message.reply_text("🔴 Sinais parados. Use /startsignals para ligar novamente.")
 
 async def add_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,9 +103,7 @@ async def add_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /add BTC_USDT")
         return
     pair = context.args[0].upper()
-    cd = context.chat_data
-    cd.setdefault("watchlist", set(DEFAULT_PAIRS[:10]))
-    cd["watchlist"].add(pair)
+    context.chat_data.setdefault("watchlist", set(DEFAULT_PAIRS[:10])).add(pair)
     await update.message.reply_text(f"✅ Adicionado: {pair.replace('_','/')} 15m")
 
 async def remove_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,52 +111,48 @@ async def remove_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /remove BTC_USDT")
         return
     pair = context.args[0].upper()
-    cd = context.chat_data
-    if "watchlist" in cd and pair in cd["watchlist"]:
-        cd["watchlist"].remove(pair)
+    wl = context.chat_data.get("watchlist", set())
+    if pair in wl:
+        wl.remove(pair)
         await update.message.reply_text(f"🗑️ Removido: {pair.replace('_','/')} 15m")
     else:
         await update.message.reply_text("Par não está na watchlist.")
 
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    wl = context.chat_data.get("watchlist", set(DEFAULT_PAIRS[:10]))
+    wl = context.chat_data.get("watchlist", set())
     if not wl:
         await update.message.reply_text("Watchlist vazia. Use /add PAR.")
-        return
-    await update.message.reply_text("👀 Watchlist: " + ", ".join(sorted(wl)))
+    else:
+        await update.message.reply_text("👀 Watchlist: " + ", ".join(sorted(wl)))
 
 async def check_loop(context: ContextTypes.DEFAULT_TYPE):
     """Job que verifica sinais e STOPs para cada chat ativo."""
     for chat_id, cd in list(context.application.chat_data.items()):
         if not cd.get("active"):
             continue
-        wl: set = cd.get("watchlist", set(DEFAULT_PAIRS[:10]))
+        wl = cd.get("watchlist", set())
         positions: Dict[str, Position] = cd.setdefault("positions", {})
 
-        # 1) tentar gerar novos sinais
+        # tentar gerar novos sinais
         for pair in list(wl):
-            if pair not in positions:  # só sinal novo se não tem posição aberta
+            if pair not in positions:
                 pos = try_build_signal(pair, DEV)
                 if pos:
                     positions[pair] = pos
                     await context.bot.send_message(
                         chat_id,
-                        text=format_signal(pos.direction, pair.replace("_","/"), pos.price, pos.stop, pos.tp1, pos.tp2)
+                        text=format_signal(pos.direction, pair, pos.price, pos.stop, pos.tp1, pos.tp2)
                     )
 
-        # 2) checar STOP nos sinais ativos
+        # checar STOP dos sinais ativos
         for pair, pos in list(positions.items()):
             df = fetch_klines(pair, limit=5)
             if df is None or df.empty:
                 continue
             last = float(df["close"].iloc[-1])
-
             stopped = (last <= pos.stop) if pos.direction == "LONG" else (last >= pos.stop)
             if stopped:
-                await context.bot.send_message(
-                    chat_id,
-                    text=f"🛑 STOP — {pair.replace('_','/')} 15m @ {pos.stop:.6f}"
-                )
+                await context.bot.send_message(chat_id, text=f"🛑 STOP — {pair.replace('_','/')} 15m @ {pos.stop:.6f}")
                 positions.pop(pair, None)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,7 +174,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove_pair))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
 
-    # job periódico
+    # >>>>>>> JobQueue (requer python-telegram-bot[job-queue]) <<<<<<<
     app.job_queue.run_repeating(check_loop, interval=POLLING_SECONDS, first=2)
 
     print("✅ Bot watch-signals iniciado. Envie /startsignals no Telegram.")
