@@ -10,9 +10,17 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ============================== CONFIG GERAL ==============================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# Arbitragem
 THRESHOLD_DEFAULT = float(os.getenv("LIMITE", "0.50"))   # % arbitragem (0.5 padrão)
 INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))     # loop arbitragem
+
+# Sinais
 SIGNAL_SEC = int(os.getenv("SIGNAL_SEC", "60"))          # loop sinais
+CAPITAL_DEFAULT = float(os.getenv("CAPITAL_USDT", "100"))
+LEVERAGE_DEFAULT = float(os.getenv("LEVERAGE", "1"))
+RISK_PCT_DEFAULT = float(os.getenv("RISK_PCT", "5"))     # % da banca arriscada por trade
+FEE_RATE_DEFAULT = float(os.getenv("FEE_RATE", "0.001")) # 0.1% por lado
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("arb-signal-bot")
@@ -208,9 +216,58 @@ def atr(ohl: List[List[float]], n: int = 14) -> List[float]:
             a.append(cur)
     return a
 
+# ============================== DIMENSIONAMENTO & PNL ==============================
+def size_position(entry: float, stop: float, capital: float, lev: float, fee_rate: float) -> Tuple[float, float]:
+    """
+    Calcula qty sugerida pela regra de risco e limita pela margem disponível.
+    Risco = RISK_PCT_DEFAULT% (ou do chat) da banca.
+    Retorna (qty, required_margin).
+    """
+    # Esses valores serão substituídos por chat na chamada; aqui só a forma.
+    risk_pct = RISK_PCT_DEFAULT / 100.0
+    stop_dist = abs(entry - stop)
+    if stop_dist <= 0 or capital <= 0:
+        return 0.0, 0.0
+    risk_usdt = capital * risk_pct
+    qty_risk = risk_usdt / stop_dist
+    # Limite por margem: qty*entry <= capital*lev
+    qty_max = (capital * lev) / max(entry, 1e-9)
+    qty = min(qty_risk, qty_max)
+    required_margin = qty * entry / max(lev, 1e-9)
+    return qty, required_margin
+
+def size_position_with_params(entry: float, stop: float, capital: float, lev: float, risk_pct: float) -> Tuple[float, float]:
+    stop_dist = abs(entry - stop)
+    if stop_dist <= 0 or capital <= 0:
+        return 0.0, 0.0
+    risk_usdt = capital * (risk_pct/100.0)
+    qty_risk = risk_usdt / stop_dist
+    qty_max = (capital * lev) / max(entry, 1e-9)
+    qty = min(qty_risk, qty_max)
+    required_margin = qty * entry / max(lev, 1e-9)
+    return qty, required_margin
+
+def estimate_pnl_for_qty(side: str, entry: float, tp1: float, tp2: float, qty: float, fee_rate: float):
+    """
+    PnL líquido estimado em TP1/TP2 para uma quantidade (qty).
+    Taxa: 2 lados (entrada+saída) * fee_rate * notional.
+    """
+    if qty <= 0 or entry <= 0:
+        return {"tp1": 0.0, "tp2": 0.0, "fees1": 0.0, "fees2": 0.0}
+    notional = qty * entry
+    if side.upper() == "LONG":
+        gross1 = (tp1 - entry) * qty
+        gross2 = (tp2 - entry) * qty
+    else:
+        gross1 = (entry - tp1) * qty
+        gross2 = (entry - tp2) * qty
+    fees1 = notional * fee_rate + (qty * tp1) * fee_rate
+    fees2 = notional * fee_rate + (qty * tp2) * fee_rate
+    return {"tp1": gross1 - fees1, "tp2": gross2 - fees2, "fees1": fees1, "fees2": fees2}
+
 # ============================== SINAL (entrada/saída) ==============================
 def build_signal(symbol: str, tf: str, use_bias: bool = True):
-    """Retorna dict com 'side', 'entry', 'stop', 'tp1', 'tp2', 'text' ou None se neutro."""
+    """Retorna dict com 'side', 'entry', 'stop', 'tp1', 'tp2', 'futures', 'tf' ou None se neutro."""
     fut = False
     try:
         ohl = fetch_ohlcv(symbol, tf, futures=fut)
@@ -244,11 +301,10 @@ def build_signal(symbol: str, tf: str, use_bias: bool = True):
     if trend_up and (rsi_up or brk_up): side = "LONG"
     if trend_dn and (rsi_dn or brk_dn): side = "SHORT"
 
-    bias_txt = ""
     if side and use_bias and fut:
         fr = funding_rate(symbol)
         if fr is not None:
-            bias_txt = f" | funding {fr:.4%}"
+            # funding muito positivo → contrarian (desfavorece LONG)
             if fr > 0.01 and side == "LONG": side = None
             if fr < -0.01 and side == "SHORT": side = None
 
@@ -267,31 +323,19 @@ def build_signal(symbol: str, tf: str, use_bias: bool = True):
         tp1   = entry - 1.0*at
         tp2   = entry - 2.0*at
 
-    text = (f"✅ {side} {symbol} {tf}\n"
-            f"Preço: {entry:.6f}\n"
-            f"Stop:  {stop:.6f}\n"
-            f"TP1:   {tp1:.6f} | TP2: {tp2:.6f}{bias_txt}")
-
     return {
         "side": side, "entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
-        "futures": fut, "tf": tf, "text": text
+        "futures": fut, "tf": tf
     }
 
 # ============================== STATE & LOOPS ==============================
 STATE: Dict[int, dict] = {}   # por chat
 
-# Lista inicial de 10 pares populares (Gate.io). O bot tenta spot e, se não houver, perp.
+# Watchlist padrão para sinais (Gate.io). O bot tenta spot e, se não houver, perp.
 DEFAULT_WATCH: List[Tuple[str, str]] = [
-    ("BTC/USDT", "15m"),
-    ("ETH/USDT", "15m"),
-    ("SOL/USDT", "15m"),
-    ("BNB/USDT", "15m"),
-    ("XRP/USDT", "15m"),
-    ("ADA/USDT", "15m"),
-    ("DOGE/USDT", "15m"),
-    ("LINK/USDT", "15m"),
-    ("LTC/USDT", "15m"),
-    ("AVAX/USDT", "15m"),
+    ("BTC/USDT", "15m"), ("ETH/USDT", "15m"), ("SOL/USDT", "15m"),
+    ("BNB/USDT", "15m"), ("XRP/USDT", "15m"), ("ADA/USDT", "15m"),
+    ("DOGE/USDT", "15m"), ("LINK/USDT", "15m"), ("LTC/USDT", "15m"), ("AVAX/USDT", "15m"),
 ]
 
 def ensure_state(chat: int):
@@ -300,7 +344,17 @@ def ensure_state(chat: int):
         tokens = TOKEN_LISTS.get(net, POLYGON_TOKENS)
         STATE[chat] = {
             "arb": {"network": net, "threshold": THRESHOLD_DEFAULT, "tokens": tokens, "task": None},
-            "sig": {"watch": [], "bias": True, "task": None, "last_bar": {}, "active": {}},
+            "sig": {
+                "watch": [],
+                "bias": True,
+                "task": None,
+                "last_bar": {},
+                "active": {},
+                "capital": CAPITAL_DEFAULT,
+                "lev": LEVERAGE_DEFAULT,
+                "risk_pct": RISK_PCT_DEFAULT,
+                "fee": FEE_RATE_DEFAULT
+            },
         }
 
 # --------- loops
@@ -325,7 +379,7 @@ async def arb_loop(app, chat_id: int):
                 await app.bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await app.bot.send_message(chat_id, f"⚠️ Arb erro: {e}")
-        await asyncio.sleep(INTERVALO_SEC if (INTERVALO_SEC:=INTERVAL_SEC) else 90)
+        await asyncio.sleep(INTERVAL_SEC)
 
 async def signal_loop(app, chat_id: int):
     while True:
@@ -348,8 +402,33 @@ async def signal_loop(app, chat_id: int):
                     cfg["last_bar"][key] = ts
                     sig = build_signal(sym, tf, use_bias=cfg["bias"])
                     if sig:
-                        cfg["active"][key] = {k: sig[k] for k in ("side","entry","stop","tp1","tp2","futures")}
-                        msgs.append("📈 *Entrada encontrada*\n" + sig["text"])
+                        # dimensionamento pela banca do chat
+                        qty, margin = size_position_with_params(
+                            sig["entry"], sig["stop"],
+                            cfg.get("capital", CAPITAL_DEFAULT),
+                            cfg.get("lev", LEVERAGE_DEFAULT),
+                            cfg.get("risk_pct", RISK_PCT_DEFAULT)
+                        )
+                        est = estimate_pnl_for_qty(
+                            sig["side"], sig["entry"], sig["tp1"], sig["tp2"],
+                            qty, cfg.get("fee", FEE_RATE_DEFAULT)
+                        )
+                        header = (f"✅ {sig['side']} {sym} {tf}\n"
+                                  f"Entrada: {sig['entry']:.6f} | Stop: {sig['stop']:.6f}\n"
+                                  f"TP1: {sig['tp1']:.6f} | TP2: {sig['tp2']:.6f}")
+                        sizing = (f"📐 Banca {cfg['capital']:.2f} USDT | Lev {cfg['lev']}x | Risco {cfg['risk_pct']:.1f}%\n"
+                                  f"Qty sugerida: {qty:.6f}\n"
+                                  f"Margem necessária ~ {margin:.2f} USDT")
+                        pnl = (f"💰 Estimativa PnL:\n"
+                               f" • TP1 ~ {est['tp1']:.2f} USDT\n"
+                               f" • TP2 ~ {est['tp2']:.2f} USDT")
+                        msgs.append("📈 *Entrada encontrada*\n" + "\n".join([header, sizing, pnl]))
+                        # registra posição ativa para acompanhar
+                        cfg["active"][key] = {
+                            "side": sig["side"], "entry": sig["entry"], "stop": sig["stop"],
+                            "tp1": sig["tp1"], "tp2": sig["tp2"], "futures": sig["futures"],
+                            "qty": qty
+                        ]
             except Exception as e:
                 msgs.append(f"⚠️ {sym} {tf}: {e}")
 
@@ -387,7 +466,12 @@ async def signal_loop(app, chat_id: int):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     ensure_state(chat)
-    await update.message.reply_text("🤖 Bot pronto!\n• /startscan (arbitragem)\n• /startsignals (sinais)")
+    await update.message.reply_text(
+        "🤖 Bot pronto!\n"
+        "• /startscan (arbitragem)\n"
+        "• /startsignals (sinais)\n"
+        "• /setcapital 102 | /setlev 10 | /setrisk 5 | /setfee 0.001"
+    )
 
 # ---- arbitragem
 async def cmd_startscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,9 +526,32 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tf = context.args[1]
     sig = build_signal(sym, tf, use_bias=STATE[chat]["sig"]["bias"])
     if sig:
+        cfg = STATE[chat]["sig"]
+        qty, margin = size_position_with_params(
+            sig["entry"], sig["stop"],
+            cfg.get("capital", CAPITAL_DEFAULT),
+            cfg.get("lev", LEVERAGE_DEFAULT),
+            cfg.get("risk_pct", RISK_PCT_DEFAULT)
+        )
+        est = estimate_pnl_for_qty(
+            sig["side"], sig["entry"], sig["tp1"], sig["tp2"],
+            qty, cfg.get("fee", FEE_RATE_DEFAULT)
+        )
+        header = (f"✅ {sig['side']} {sym} {tf}\n"
+                  f"Entrada: {sig['entry']:.6f} | Stop: {sig['stop']:.6f}\n"
+                  f"TP1: {sig['tp1']:.6f} | TP2: {sig['tp2']:.6f}")
+        sizing = (f"📐 Banca {cfg['capital']:.2f} USDT | Lev {cfg['lev']}x | Risco {cfg['risk_pct']:.1f}%\n"
+                  f"Qty sugerida: {qty:.6f}\n"
+                  f"Margem necessária ~ {margin:.2f} USDT")
+        pnl = (f"💰 Estimativa PnL:\n"
+               f" • TP1 ~ {est['tp1']:.2f} USDT\n"
+               f" • TP2 ~ {est['tp2']:.2f} USDT")
         key = f"{sym}:{tf}"
-        STATE[chat]["sig"]["active"][key] = {k: sig[k] for k in ("side","entry","stop","tp1","tp2","futures")}
-        await update.message.reply_text("📈 *Entrada encontrada*\n" + sig["text"], parse_mode="Markdown")
+        STATE[chat]["sig"]["active"][key] = {
+            "side": sig["side"], "entry": sig["entry"], "stop": sig["stop"],
+            "tp1": sig["tp1"], "tp2": sig["tp2"], "futures": sig["futures"], "qty": qty
+        }
+        await update.message.reply_text("📈 *Entrada encontrada*\n" + "\n".join([header, sizing, pnl]), parse_mode="Markdown")
     else:
         await update.message.reply_text("➖ Sem entrada no momento.")
 
@@ -516,8 +623,60 @@ async def cmd_setbias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     STATE[chat]["sig"]["bias"] = (context.args[0].lower() == "on")
     await update.message.reply_text(f"✅ Bias funding: {'on' if STATE[chat]['sig']['bias'] else 'off'}")
 
+# ---- parâmetros da banca
+async def cmd_setcapital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    ensure_state(chat)
+    if not context.args:
+        await update.message.reply_text("Uso: /setcapital <valor_em_USDT>")
+        return
+    try:
+        v = float(context.args[0])
+        STATE[chat]["sig"]["capital"] = max(0, v)
+        await update.message.reply_text(f"✅ Capital definido: {v:.2f} USDT")
+    except:
+        await update.message.reply_text("Valor inválido.")
+
+async def cmd_setlev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    ensure_state(chat)
+    if not context.args:
+        await update.message.reply_text("Uso: /setlev <alavancagem_ex.:_1,3,5,10>")
+        return
+    try:
+        v = float(context.args[0])
+        STATE[chat]["sig"]["lev"] = max(1, v)
+        await update.message.reply_text(f"✅ Alavancagem definida: {v}x")
+    except:
+        await update.message.reply_text("Valor inválido.")
+
+async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    ensure_state(chat)
+    if not context.args:
+        await update.message.reply_text("Uso: /setrisk <percentual_de_risco_por_trade> (ex.: 5)")
+        return
+    try:
+        v = float(context.args[0])
+        STATE[chat]["sig"]["risk_pct"] = max(0.0, v)
+        await update.message.reply_text(f"✅ Risco por trade: {v:.2f}% da banca")
+    except:
+        await update.message.reply_text("Valor inválido.")
+
+async def cmd_setfee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    ensure_state(chat)
+    if not context.args:
+        await update.message.reply_text("Uso: /setfee <taxa_por_lado_ex.:_0.001_para_0.1%>")
+        return
+    try:
+        v = float(context.args[0])
+        STATE[chat]["sig"]["fee"] = max(0.0, v)
+        await update.message.reply_text(f"✅ Taxa por lado definida: {v*100:.3f}%")
+    except:
+        await update.message.reply_text("Valor inválido.")
+
 # trocar exchange on-the-fly
-import ccxt  # já importado acima, mantido aqui por clareza
 def build_exchanges_cmd(name: str):
     return build_exchanges(name)
 
@@ -538,7 +697,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Exchange: {EXCHANGE_NAME}\n"
         f"Arb — rede: {arb['network']} | tokens: {len(arb['tokens'])} | limite: {arb['threshold']}%\n"
-        f"Sinais — pares: {len(sig['watch'])} | bias funding: {'on' if sig['bias'] else 'off'} | ativos: {len(sig['active'])}"
+        f"Sinais — pares: {len(sig['watch'])} | ativos: {len(sig['active'])}\n"
+        f"Banca: {sig['capital']:.2f} USDT | Lev: {sig['lev']}x | Risco: {sig['risk_pct']:.2f}% | Taxa: {sig['fee']*100:.2f}%"
     )
 
 # ============================== MAIN ==============================
@@ -565,8 +725,16 @@ def main():
     app.add_handler(CommandHandler("startsignals", cmd_startsignals))
     app.add_handler(CommandHandler("stopsignals", cmd_stopsignals))
     app.add_handler(CommandHandler("setbias", cmd_setbias))
-    app.add_handler(CommandHandler("setexchange", cmd_setexchange))
-    app.run_polling(close_loop=False)
 
-if __name__ == "__main__":
-    main()
+    # banca / taxas
+    app.add_handler(CommandHandler("setcapital", cmd_setcapital))
+    app.add_handler(CommandHandler("setlev", cmd_setlev))
+    app.add_handler(CommandHandler("setrisk", cmd_setrisk))
+    app.add_handler(CommandHandler("setfee", cmd_setfee))
+
+    # exchange
+    app.add_handler(CommandHandler("setexchange", cmd_setexchange))
+
+    app.run_polling(close_loop=False)
+     if __name__ == "__main__":
+         main()
