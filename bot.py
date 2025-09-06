@@ -13,7 +13,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 THRESHOLD_DEFAULT = float(os.getenv("LIMITE", "0.50"))     # padrão 0.5%
 INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))       # segundos
 
-# Lista de tokens essenciais para arbitragem em Polygon
+# Lista de tokens para arbitragem em Polygon (liquidez alta)
 DEFAULT_TOKENS: List[str] = [
     # Stablecoins
     "0xC2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT
@@ -26,14 +26,23 @@ DEFAULT_TOKENS: List[str] = [
     "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",  # WETH
     "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",  # WBTC
     "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WMATIC
+
+    # DeFi / DEX tokens populares
+    "0xD6DF932A45C0f255f85145f286eA0b292B21C90B",  # AAVE
+    "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39",  # LINK
+    "0x172370d5Cd63279eFa6d502DAB29171933a610AF",  # CRV
+    "0xb33EaAd8d922B1083446DC23f610c2567fB5180f",  # UNI
+    "0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fdDa50a",  # SUSHI
+    "0x9A71012B13CA4d3D0Cdc72A177DF3ef03b0E76A3",  # BAL
+    "0x831753DD7087CaC61aB5644b308642cc1c33Dc13",  # QUICK
 ]
 
-# ───────────────────────────── API GeckoTerminal ─────────────────────────────
+# ───────────────────────────── GeckoTerminal ─────────────────────────────
 GT_BASE = "https://api.geckoterminal.com/api/v2"
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("scanner-bot")
 
-STATE = {}
+STATE: Dict[int, dict] = {}
 
 def gt_token_top_pools(network: str, token: str, page: int = 1) -> Dict:
     url = f"{GT_BASE}/networks/{network}/tokens/{token}/pools?page={page}"
@@ -99,7 +108,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     network_env = os.getenv("REDE", "polygon").strip().lower()
     STATE[chat] = {
         "tokens": DEFAULT_TOKENS,
-        "network": network_env,
+        "network": network_env,           # lê do Railway a cada /start
         "threshold": THRESHOLD_DEFAULT,
         "task": None
     }
