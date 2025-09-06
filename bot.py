@@ -13,9 +13,9 @@ from telegram.ext import (
 
 # ───────────────────────────── Configuração ─────────────────────────────
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-NETWORK = os.getenv("NETWORK", "ethereum")
-THRESHOLD = float(os.getenv("THRESHOLD", "0.10"))  # threshold inicial baixo
-INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "90"))
+NETWORK = os.getenv("REDE", "ethereum")                 # antes era NETWORK
+THRESHOLD = float(os.getenv("LIMITE", "0.10"))          # antes era THRESHOLD
+INTERVAL_SEC = int(os.getenv("INTERVALO_SEC", "90"))    # mantido igual
 
 # Lista de 50 tokens ERC-20 (Ethereum)
 DEFAULT_TOKENS = [
@@ -73,15 +73,13 @@ DEFAULT_TOKENS = [
     "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"  # stETH
 ]
 
-# ───────────────────────────── APIs ─────────────────────────────
+# ───────────────────────────── API GeckoTerminal ─────────────────────────────
 GT_BASE = "https://api.geckoterminal.com/api/v2"
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("scanner-bot")
 
-# Estado por chat
 STATE = {}
 
-# Funções auxiliares
 def gt_token_top_pools(network: str, token: str, page: int = 1) -> Dict:
     url = f"{GT_BASE}/networks/{network}/tokens/{token}/pools?page={page}"
     r = requests.get(url, timeout=20)
@@ -117,7 +115,6 @@ def summarize_spreads(network: str, tokens: List[str]):
     rows.sort(key=lambda r: r[3], reverse=True)
     return rows
 
-# Scanner loop
 async def scanner_loop(app, chat_id: int):
     while True:
         cfg = STATE.get(chat_id)
@@ -140,7 +137,6 @@ async def scanner_loop(app, chat_id: int):
             await app.bot.send_message(chat_id, f"⚠️ Erro: {e}")
         await asyncio.sleep(INTERVAL_SEC)
 
-# Handlers
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     STATE[chat] = {"tokens": DEFAULT_TOKENS, "network": NETWORK, "threshold": THRESHOLD, "task": None}
@@ -171,7 +167,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use /start primeiro.")
         return
     await update.message.reply_text(
-        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nThreshold: {cfg['threshold']}%"
+        f"Rede: {cfg['network']}\nTokens: {len(cfg['tokens'])}\nLimite: {cfg['threshold']}%"
     )
 
 def main():
