@@ -179,3 +179,6 @@ def main():
     app.add_handler(CommandHandler("stopscan", cmd_stopscan))
     app.add_handler(CommandHandler("status", cmd_status))
     app.run_polling(close_loop=False)
+
+if __name__ == "__main__":
+    main()
