@@ -1,1 +1,1 @@
-worker: python bot_watch_signals.py
+worker: python forex_signals_bot.py
