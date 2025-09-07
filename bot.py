@@ -221,7 +221,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Desvio:{dev*100:.3f}% vs {thr*100:.2f}%"
     )
 
-# extras de configuração via comando (opcional, não documentados na /start)
+# extras (ajustes via chat)
 async def setdev(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         val = float(context.args[0])
@@ -296,7 +296,7 @@ async def check_loop(context: ContextTypes.DEFAULT_TYPE):
                 positions.pop(pair, None)
                 continue
 
-            # TP1 (não remove posição, só avisa)
+            # TP1
             if (last >= pos.tp1 and pos.direction == "LONG") or (last <= pos.tp1 and pos.direction == "SHORT"):
                 await context.bot.send_message(chat_id, text=f"✅ TP1 atingido — {pair} 15m @ {last:.6f}")
 
@@ -314,6 +314,21 @@ def main():
     _start_http_server()  # mantém o container Railway (Web) vivo
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # caso a instalação não traga a job_queue automaticamente,
+    # criamos uma de fallback (requer o extra [job-queue] instalado)
+    if app.job_queue is None:
+        try:
+            from telegram.ext import JobQueue
+            jq = JobQueue()
+            jq.set_application(app)
+            jq.start()
+            app.job_queue = jq
+            log.info("JobQueue criada manualmente.")
+        except Exception as e:
+            log.error("JobQueue ausente e não pôde ser criada. "
+                      "Instale o pacote com o extra [job-queue]. Erro: %s", e)
+            raise
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("startsignals", startsignals))
